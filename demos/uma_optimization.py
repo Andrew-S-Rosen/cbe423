@@ -2,7 +2,8 @@
 # requires-python = ">=3.10"
 # dependencies = [
 #     "marimo",
-#     "upet",
+#     "fairchem-core>=2.23",
+#     "huggingface-hub",
 #     "ase>=3.23",
 #     "numpy",
 #     "plotly",
@@ -12,7 +13,7 @@
 import marimo
 
 __generated_with = "0.25.1"
-app = marimo.App(width="medium", app_title="Rolling downhill: structure optimization with UPET + ASE")
+app = marimo.App(width="medium", app_title="Rolling downhill: structure optimization with UMA + ASE")
 
 
 @app.cell(hide_code=True)
@@ -26,7 +27,7 @@ def _():
 def _(mo):
     mo.md(r"""
     # ⛰️ Rolling downhill
-    ### Structure optimization with ASE and the UPET machine-learning potential
+    ### Structure optimization with ASE and the UMA machine-learning potential
 
     Every arrangement of atoms has an **energy**. Nature prefers low energy, so molecules and crystals
     settle into shapes where nudging any atom in any direction would only raise the energy.
@@ -49,17 +50,20 @@ def _(mo):
     /// admonition | ▶️ Only seeing text, no sliders or plots?
     The notebook hasn't been run yet. Switch to the editor view and click **Run all** (or set
     *Settings → Runtime → On startup* to **autorun**), then switch back to app view.
-    The first run installs PyTorch and downloads the UPET model, so give it a minute or two.
+    The first run installs the packages and downloads the UMA model, so give it a minute or two.
+    You also need a (free) Hugging Face token with access to UMA: see section 0.
     ///
 
     /// details | 🧰 The tools we're using
     - **[ASE](https://wiki.fysik.dtu.dk/ase/)** (the Atomic Simulation Environment) is a Python library for
       building, manipulating, and simulating atomic structures. It provides the `Atoms` object,
       the optimizers, and a common *calculator* interface for computing energies and forces.
-    - **[UPET](https://github.com/lab-cosmo/upet)** provides universal machine-learning interatomic
-      potentials based on the Point Edge Transformer (PET) architecture. A potential like PET-MAD
-      was trained to reproduce quantum-mechanical (DFT) energies and forces across most of the periodic table,
-      but runs thousands of times faster, which is what makes this notebook interactive.
+    - **[UMA](https://huggingface.co/facebook/UMA)** (Universal Model for Atoms, from Meta's
+      [FAIR Chemistry](https://github.com/facebookresearch/fairchem) team) is a universal machine-learning
+      interatomic potential. It was trained on hundreds of millions of quantum-mechanical (DFT) calculations
+      spanning molecules, materials, catalysts, and more, and it reproduces DFT energies and forces across most
+      of the periodic table while running thousands of times faster. That speed is what makes this notebook
+      interactive. We use the small model, **UMA-S 1.2.1** (`uma-s-1p2p1`).
     ///
     """)
     return
@@ -68,26 +72,8 @@ def _(mo):
 @app.cell(hide_code=True)
 def _():
     import time
-    import warnings
 
     import numpy as np
-
-    # The UPET calculator also computes a stress for isolated molecules, where it is
-    # undefined (NaN) and triggers a harmless RuntimeWarning. Silence just that one.
-    warnings.filterwarnings("ignore", message="invalid value encountered", category=RuntimeWarning,
-                            module="metatomic_ase")
-
-    # Downloading the public model weights works fine without a Hugging Face token;
-    # hide the "unauthenticated requests to the HF Hub" nag (and only that message).
-    import logging
-
-    class _DropHFTokenNag(logging.Filter):
-        def filter(self, record):
-            return "unauthenticated requests to the HF Hub" not in record.getMessage()
-
-    for _name in ("huggingface_hub", "huggingface_hub.utils._http", "huggingface_hub.file_download"):
-        logging.getLogger(_name).addFilter(_DropHFTokenNag())
-    warnings.filterwarnings("ignore", message=".*unauthenticated requests to the HF Hub.*")
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 
@@ -131,52 +117,79 @@ def _(mo):
     ## 0 · Load the potential
 
     First we create an ASE **calculator**: the object that, given atom positions, returns the energy
-    and forces. With UPET this is a single line:
+    and forces. With UMA it takes two lines: load the model once (a *predictor*), then wrap it in a
+    calculator for the kind of system you are simulating.
 
     ```python
     import torch
-    from upet.ase import UPETCalculator
+    from fairchem.core import FAIRChemCalculator, pretrained_mlip
 
     device = "cuda" if torch.cuda.is_available() else "cpu"   # use the GPU if there is one
-    calc = UPETCalculator(model="pet-mad-xs", version="1.6.0", device=device)
+    predictor = pretrained_mlip.get_predict_unit("uma-s-1p2p1", device=device)
+    calc = FAIRChemCalculator(predictor, task_name="omol")    # molecules
     ```
 
-    The first time you pick a model its weights are downloaded and cached. Smaller models are faster;
-    larger ones are more accurate. **XS** is plenty for exploring.
+    UMA is one network with several **task heads**, one per family of training data, each matching a
+    different DFT setup. We use two of them:
+
+    | `task_name` | Trained on | Used here for |
+    |---|---|---|
+    | `"omol"` | molecules (ωB97M-V hybrid DFT) | sections 1–3. Needs the total `charge` and spin multiplicity `spin` in `atoms.info` (default: neutral singlet). |
+    | `"omat"` | inorganic crystals (PBE / PBE+U) | section 4 |
+
+    The notebook picks the right head automatically: periodic systems get `omat`, isolated molecules get `omol`.
     """)
     return
 
 
 @app.cell(hide_code=True)
 def _(mo):
-    model_picker = mo.ui.dropdown(
-        options={
-            "PET-MAD XS · fastest": "pet-mad-xs",
-            "PET-MAD S · balanced": "pet-mad-s",
-            "PET-MAD M · most accurate": "pet-mad-m",
-        },
-        value="PET-MAD XS · fastest",
-        label="**Model**",
+    hf_token = mo.ui.text(
+        kind="password",
+        placeholder="hf_…",
+        label="**Hugging Face token**",
+        full_width=True,
     )
-    model_picker
-    return (model_picker,)
+    mo.vstack([
+        mo.md(
+            "The UMA weights are free but **gated**: Hugging Face only lets you download them after you accept "
+            "Meta's license. You only need to do this once."
+        ),
+        mo.accordion({
+            "🔑 How do I get a token?": mo.md(
+                """
+    1. Create a free account at [huggingface.co/join](https://huggingface.co/join) (or log in).
+    2. Go to [huggingface.co/facebook/UMA](https://huggingface.co/facebook/UMA), fill in the form, and accept
+       the FAIR Chemistry License. **Approval is manual and can take from minutes to a day or two**, so do this
+       before class. You'll get an email when you're approved.
+    3. Create a token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens):
+       **Create new token → Read** is enough. Copy it (it starts with `hf_`).
+    4. Paste it in the box below. It stays in this session only and is not saved in the notebook.
+    """
+            )
+        }),
+        hf_token,
+    ])
+    return (hf_token,)
 
 
 @app.cell(hide_code=True)
 def _():
-    # Lives in its own cell so loaded models survive re-runs of the loader cell.
-    calc_cache = {}
-    return (calc_cache,)
+    # Lives in its own cell so the loaded model survives re-runs of the loader cell.
+    predictor_cache = {}
+    return (predictor_cache,)
 
 
 @app.cell(hide_code=True)
-def _(calc_cache, mo, model_picker, time):
+def _(hf_token, mo, predictor_cache, time):
     import os
     import sys
 
     import torch
+    from huggingface_hub import get_token
+    from huggingface_hub.errors import GatedRepoError, HfHubHTTPError
 
-    # Importing UPET loads NVIDIA Warp, whose compiled code prints a "Could not find or load the
+    # Importing fairchem loads NVIDIA Warp, whose compiled code prints a "Could not find or load the
     # NVIDIA CUDA driver" note straight to the OS-level stderr on machines without a GPU. That's
     # expected here (we fall back to the CPU), so mute stderr just for this import.
     sys.stderr.flush()
@@ -184,36 +197,76 @@ def _(calc_cache, mo, model_picker, time):
     _null_fd = os.open(os.devnull, os.O_WRONLY)
     try:
         os.dup2(_null_fd, 2)
-        from upet.ase import UPETCalculator
+        from fairchem.core import FAIRChemCalculator, pretrained_mlip
     finally:
         os.dup2(_saved_fd, 2)
         os.close(_null_fd)
         os.close(_saved_fd)
 
+    MODEL_NAME = "uma-s-1p2p1"
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    _key = (model_picker.value, device)
+
+    # Use the token from the box; otherwise fall back to an HF_TOKEN environment variable
+    # or a token saved by `hf auth login`.
+    _token = hf_token.value.strip() or get_token()
+    mo.stop(
+        device not in predictor_cache and not _token,
+        mo.callout(mo.md("⬆️ **Paste your Hugging Face token above** to download UMA. "
+                         "Everything below needs the model."), kind="warn"),
+    )
+    if hf_token.value.strip():
+        os.environ["HF_TOKEN"] = hf_token.value.strip()
+
     _t0 = time.perf_counter()
-    if _key not in calc_cache:
-        with mo.status.spinner(title=f"Loading {model_picker.value} (first use downloads the weights)…"):
-            calc_cache[_key] = UPETCalculator(model=model_picker.value, version="1.6.0", device=device)
-    calc = calc_cache[_key]
+    if device not in predictor_cache:
+        try:
+            with mo.status.spinner(title=f"Loading {MODEL_NAME} (first use downloads the weights)…"):
+                # "batch" mode keeps the full model, which suits a notebook that keeps switching between
+                # different molecules and crystals (the default mode specializes to one composition).
+                predictor_cache[device] = pretrained_mlip.get_predict_unit(
+                    MODEL_NAME, inference_settings="batch", device=device
+                )
+        except GatedRepoError:
+            mo.stop(True, mo.callout(mo.md(
+                "🔒 **Your token works, but this account doesn't have access to UMA yet.** Request access at "
+                "[huggingface.co/facebook/UMA](https://huggingface.co/facebook/UMA) and wait for the approval "
+                "email, then re-run this cell."), kind="danger"))
+        except HfHubHTTPError as _err:
+            mo.stop(True, mo.callout(mo.md(
+                "❌ **Hugging Face refused the download.** Check that you pasted the whole token (it starts with "
+                f"`hf_`) and that it hasn't been deleted.\n\n`{type(_err).__name__}: {str(_err).splitlines()[0]}`"),
+                kind="danger"))
+    predictor = predictor_cache[device]
+
+    _calcs = {
+        "omol": FAIRChemCalculator(predictor, task_name="omol"),
+        "omat": FAIRChemCalculator(predictor, task_name="omat"),
+    }
+
+    def calc_for(atoms):
+        """Pick the UMA task head: `omat` for periodic crystals, `omol` for isolated molecules."""
+        if atoms.pbc.any():
+            return _calcs["omat"]
+        atoms.info.setdefault("charge", 0)  # neutral
+        atoms.info.setdefault("spin", 1)    # spin multiplicity 2S+1 (1 = singlet)
+        return _calcs["omol"]
 
     mo.callout(
         mo.md(
-            f"✅ **{model_picker.value}** v1.6.0 is ready on **{device.upper()}** "
+            f"✅ **{MODEL_NAME}** is ready on **{device.upper()}** "
             f"({time.perf_counter() - _t0:.1f} s)."
         ),
         kind="success",
     )
-    return (calc,)
+    return (calc_for,)
 
 
 @app.cell(hide_code=True)
-def _(FrechetCellFilter, GPa, calc, np, time):
+def _(FrechetCellFilter, GPa, calc_for, np, time):
     def energy_and_forces(atoms):
         """Single-point evaluation: energy (eV) and forces (eV/Å) for a copy of `atoms`."""
         a = atoms.copy()
-        a.calc = calc
+        a.calc = calc_for(a)
         return a.get_potential_energy(), a.get_forces()
 
     def max_force(forces):
@@ -222,7 +275,7 @@ def _(FrechetCellFilter, GPa, calc, np, time):
 
     def run_optimization(atoms, optimizer_cls, fmax, steps, use_cell_filter=False, **opt_kwargs):
         """Relax `atoms` in place and record a snapshot at every step."""
-        atoms.calc = calc
+        atoms.calc = calc_for(atoms)
         target = FrechetCellFilter(atoms) if use_cell_filter else atoms
         frames = []
 
@@ -581,7 +634,7 @@ def _(
     _r, _e, _f = _path[-1], _pe[-1], _pf[-1]
 
     _fig = go.Figure()
-    _fig.add_trace(go.Scatter(x=r_grid, y=e_grid, mode="lines", name="UPET energy",
+    _fig.add_trace(go.Scatter(x=r_grid, y=e_grid, mode="lines", name="UMA energy",
                               line=dict(color="#4c78a8", width=3)))
     _fig.add_trace(go.Scatter(
         x=_path, y=_pe, mode="lines+markers", name="your path",
@@ -658,7 +711,7 @@ def _(mo):
 
     atoms = molecule("H2O")                # 1. build a structure
     atoms.rattle(stdev=0.2)                # 2. (here) scramble it on purpose
-    atoms.calc = calc                      # 3. attach the UPET calculator
+    atoms.calc = FAIRChemCalculator(predictor, task_name="omol")  # 3. attach UMA (molecule head)
     BFGS(atoms).run(fmax=0.02)             # 4. step until every force < 0.02 eV/Å
     ```
 
@@ -856,8 +909,8 @@ def _(
         mo.accordion({
             "📏 Bond lengths: shaken vs relaxed vs reference": mo.vstack([
                 mo.md("The *reference* column is the tabulated G2 geometry shipped with ASE. The relaxed "
-                      "bonds won't match it perfectly: the reference and PET-MAD use different levels of theory, "
-                      "so differences of ~0.01 Å are expected."),
+                      "bonds won't match it perfectly: the reference (MP2) and UMA's `omol` head (ωB97M-V) use different "
+                      "levels of theory, so differences of ~0.01 Å are expected."),
                 mo.ui.table(_rows, selection=None, pagination=False),
             ]),
             "🤔 Didn't return to the reference shape?": mo.md(
@@ -974,7 +1027,7 @@ def _(mo):
     from ase.filters import FrechetCellFilter
 
     atoms = bulk("Cu", "fcc", a=3.80, cubic=True)   # deliberately strained
-    atoms.calc = calc
+    atoms.calc = FAIRChemCalculator(predictor, task_name="omat")   # crystal head
     BFGS(FrechetCellFilter(atoms)).run(fmax=0.01)   # relax positions AND cell
     print(atoms.cell.cellpar())                     # relaxed lattice constant
     ```
@@ -1151,13 +1204,15 @@ def _(mo):
     - Local optimizers find the **nearest minimum**, which isn't always the global one.
     - For crystals, the **cell** must be relaxed too, using a filter like `FrechetCellFilter`. Symmetry alone
       can make atomic forces vanish in a badly strained crystal.
-    - A universal ML potential like **UPET / PET-MAD** makes all of this fast enough to explore interactively.
+    - A universal ML potential like **UMA** makes all of this fast enough to explore interactively. Pick the
+      task head that matches your system (`omol` for molecules, `omat` for inorganic crystals).
       For publication-quality numbers, it's common to refine the final structure with DFT.
 
     ### 🧪 Things to try
     1. Set the shake strength to **0.4 Å** on ethanol and check the bond table: did a bond break or the molecule change conformer?
     2. In the race, tighten `fmax` to **0.005** and see which optimizer struggles most near the end.
-    3. Switch the model to **PET-MAD S** and compare the lattice constants and bulk moduli in section 4.
+    3. Relax all six crystals in section 4 and compare with experiment. The `omat` head learned PBE, which
+       tends to **overestimate** lattice constants by about 1%. Does UMA follow that trend?
     4. Compress **NaCl** by −8% and watch how hard it pushes back compared with **tungsten**.
 
     ### 📋 Cheat sheet
@@ -1166,26 +1221,29 @@ def _(mo):
     from ase.optimize import BFGS
     from ase.filters import FrechetCellFilter
     from ase.io import write
-    from upet.ase import UPETCalculator
+    from fairchem.core import FAIRChemCalculator, pretrained_mlip
     import torch
 
+    # needs a Hugging Face token with UMA access: set HF_TOKEN or run `hf auth login`
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    calc = UPETCalculator(model="pet-mad-s", version="1.6.0", device=device)
+    predictor = pretrained_mlip.get_predict_unit("uma-s-1p2p1", device=device)
 
     # Molecule: relax atomic positions
     mol = molecule("CH3CH2OH")
-    mol.calc = calc
+    mol.info.update(charge=0, spin=1)          # neutral singlet
+    mol.calc = FAIRChemCalculator(predictor, task_name="omol")
     BFGS(mol, trajectory="ethanol.traj").run(fmax=0.02)   # view with: ase gui ethanol.traj
 
     # Crystal: relax positions + cell
     si = bulk("Si", "diamond", a=5.6, cubic=True)
-    si.calc = calc
+    si.calc = FAIRChemCalculator(predictor, task_name="omat")
     BFGS(FrechetCellFilter(si)).run(fmax=0.01)
     print(si.cell.cellpar())
     write("si_relaxed.cif", si)
     ```
 
-    *UPET & PET-MAD: [github.com/lab-cosmo/upet](https://github.com/lab-cosmo/upet) ·
+    *UMA: [huggingface.co/facebook/UMA](https://huggingface.co/facebook/UMA) ·
+    fairchem: [github.com/facebookresearch/fairchem](https://github.com/facebookresearch/fairchem) ·
     ASE optimizers: [ASE documentation](https://wiki.fysik.dtu.dk/ase/ase/optimize.html)*
     """)
     return
