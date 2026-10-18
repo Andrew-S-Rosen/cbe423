@@ -2,9 +2,9 @@
 # requires-python = ">=3.10"
 # dependencies = [
 #     "marimo",
-#     "fairchem-core>=2.23",
+#     "fairchem-core==2.23.0",
 #     "huggingface-hub",
-#     "ase>=3.23",
+#     "ase>=3.26",
 #     "numpy",
 #     "plotly",
 # ]
@@ -70,7 +70,35 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _():
+def _(mo):
+    # molab (and a plain `marimo edit`) ignores the script header at the top of this file, so install
+    # anything that's missing here. With `marimo edit --sandbox` everything is already present.
+    import importlib as _importlib
+    import importlib.util as _ilu
+    import shutil as _shutil
+    import subprocess as _subprocess
+    import sys as _sys
+
+    _requirements = {"ase": "ase>=3.26", "fairchem.core": "fairchem-core==2.23.0", "plotly": "plotly"}
+    _missing = [_req for _mod, _req in _requirements.items() if _ilu.find_spec(_mod.split(".")[0]) is None]
+    if _missing:
+        _uv = _shutil.which("uv")
+        _cmd = ([_uv, "pip", "install", "--python", _sys.executable] if _uv
+                else [_sys.executable, "-m", "pip", "install"]) + _missing
+        with mo.status.spinner(title=f"Installing {', '.join(_missing)} (first run only, ~1–2 min)…"):
+            _proc = _subprocess.run(_cmd, capture_output=True, text=True)
+        mo.stop(_proc.returncode != 0, mo.callout(mo.vstack([
+            mo.md("❌ **Installing the packages failed.** Restart the kernel and try again; the log is below."),
+            mo.plain_text(_proc.stderr[-3000:]),
+        ]), kind="danger"))
+        _importlib.invalidate_caches()
+    deps_ready = True
+    return (deps_ready,)
+
+
+@app.cell(hide_code=True)
+def _(deps_ready):
+    assert deps_ready  # run after the install cell above
     import time
 
     import numpy as np
