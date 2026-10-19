@@ -564,7 +564,7 @@ def _(Atoms, diatomic_picker, energy_and_forces, molecule, np):
         # Force on atom 1 along the bond axis: positive = pushes atoms apart
         return e, float(f[1, 2])
 
-    r_grid = np.linspace(0.65 * r_ref, 2.2 * r_ref, 90)
+    r_grid = np.linspace(0.7 * r_ref, 1.55 * r_ref, 90)
     _eg = np.array([dimer_energy_force(r)[0] for r in r_grid])
     e_zero = _eg.min()
     e_grid = _eg - e_zero
@@ -594,7 +594,7 @@ def _(Atoms, diatomic_picker, energy_and_forces, molecule, np):
 def _(alpha_crit, mo, r_grid, r_ref):
     start_r = mo.ui.slider(
         start=round(float(r_grid[0]), 2), stop=round(float(r_grid[-1]), 2), step=0.01,
-        value=round(1.6 * r_ref, 2), label="Starting bond length $r_0$ (Å)", show_value=True, debounce=True,
+        value=round(1.35 * r_ref, 2), label="Starting bond length $r_0$ (Å)", show_value=True, debounce=True,
     )
     alpha = mo.ui.slider(
         steps=[round(alpha_crit * f, 4) for f in (0.1, 0.25, 0.5, 0.75, 0.9, 1.0, 1.05, 1.2)],
@@ -624,7 +624,7 @@ def _(alpha, dimer_energy_force, get_path, mo, np, r_grid, set_path, start_r):
             for _ in range(n):
                 r = path[-1]
                 _, f = dimer_energy_force(r)
-                r_new = float(np.clip(r + alpha.value * f, 0.5 * r_grid[0], 1.3 * r_grid[-1]))
+                r_new = float(np.clip(r + alpha.value * f, 0.5 * r_grid[0], 1.03 * r_grid[-1]))
                 path.append(r_new)
             set_path(path)
             return (v or 0) + 1
