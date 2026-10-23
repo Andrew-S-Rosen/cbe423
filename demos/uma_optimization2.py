@@ -1,20 +1,3 @@
-Claude
-Claude Desktop (Windows), Connected
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-Rolling downhill · PY
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
@@ -2081,7 +2064,3 @@ def _(mo):
  
 if __name__ == "__main__":
     app.run()
- 
-Claude finished the response
-
-This file type cannot be opened. (×2)
